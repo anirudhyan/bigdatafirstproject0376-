@@ -1,0 +1,90 @@
+1.customers
+create table customer(cust_id int,first_name varchar(45),middle_name varchar(45),last_value varchar(45),cust_ssn BigInt,cust_street varchar(45),cust_city varchar(45),cust_state varchar(45),cust_country varchar(45), cust_zip varchar(45),cust_phoneno BigInt, cust_email varchar(45))
+row format delimited fields terminated by ',' lines terminated by '\n' tblproperties ("skip.header.line.count"="1");
+load data local inpath '/home/hduser/Sourcelocal/CUSTOMER.csv' into table customer;
+2.item
+create table item(item_code int,item_name varchar(45),item_price float) 
+row format delimited fields terminated by ',' lines terminated by '\n' tblproperties ("skip.header.line.count"="1");
+load data local inpath '/home/hduser/Sourcelocal/ITEM.csv' into table item;
+
+3.tran_cust_item
+
+create TEMPORARY table cust_item(tran_idint,tran_date date,cust_id int,item_code int,no_of_item int) row format delimited fields terminated by',' lines terminated by '\n';
+load data local inpath '/home/hduser/Sourcelocal/CUST_ITEM.csv' into table cust_item;
+set hive.exec.dynamic.partition=true;
+set hive.exec.dynamic.partition.mode= nonstrict;
+create external table tran_cust_item (tran_id int,tran_date date,cust_id int,item_code int,no_of_item int) partitioned by (year int,month int) row format delimited fields terminated by ',' lines terminated by '/n' stored as textfile location '/inputdir/custitem';
+insert into table tran_cust_item partition(year,month) select tran_id,tran_date,cust_id,item_code,no_of_item,year(tran_date),month(tran_date) from cust_item;
+
+Requirement 1
+remove the folder
+hdfs dfs -rm-r /project/req1
+
+HDFS:
+hdfs dfs -mkdir /project/req1
+
+spark.sql("create external table targetdb.cust_purc_year_mon_summ(customer_name varchar(45),product_name varchar(45),Year int,month varchar(12),item_value decimal(10,2)) stored as parquet location 'hdfs://localhost:50000/project/req1'")
+
+spark.sql("insert into table targetdb.cust_purc_year_mon_summ select rpad(concat(c.first_name,' ',c.last_name),45,' ')AS customer_name ,rpad(i.item_name,45,' ') As product_name,year(tc.tran_date) as year, date_format(tc.tran_date,'MMMMM') as month,(i.item_price*tc.no_of_item) AS item_value from sourcedb.customer c JOIN sourcedb.tran_cust_item tc ON c.cust_id=tc.cust_id JOIN sourcedb.item i ON i.item_code=tc.item_code Order by year,month,customer_name")
+spark.sql("select * from targetdb.cust_purc_year_mon_summ order by customer_name,year").show(20,False)
+========================================================================================================================================================================
+Requirement 2
+Remove the direcctory
+drop table item_least_moved;
+hdfs dfs -rm -r /project/req2
+HDFS:
+hdfs dfs -mkdir /project/req2
+In pyspark:
+spark.sql(“create database targetdb”)
+temp1=spark.sql("select concat(c.first_name,' ',c.last_name) as customer_name,i.item_name as product_name,(ct.no_of_item*i.item_price) as sold_value, ct.year as year from sourcedb.customer c join sourcedb.tran_cust_item ct on c.cust_id=ct.cust_id join sourcedb.item i on i.item_code =ct.item_code ")
+temp1.createOrReplaceTempView("temporary1")
+temp2=spark.sql("select  customer_name, product_name,sum(sold_value) as sold_value,year from temporary1 group by customer_name,product_name,year order by sold_value limit 10")
+temp2. createOrReplaceTempView("temporary2")
+item_least_moved=spark.sql("select rpad(customer_name,70,' ') as customer_name,rpad(product_name,40,' ') as product_name,sold_value,year from temporary2")
+spark.sql("create external table targetdb.item_least_moved (customer_name varchar(70),product_name varchar(40),sold_value decimal(10,2),year int) stored as parquet location 'hdfs://localhost:50000/project/req2' ")
+item_least_moved.createOrReplaceTempView("itemleastmoved")
+
+spark.sql("insert into targetdb.item_least_moved select * from itemleastmoved")
+spark.sql("select * from targetdb.item_least_moved").show(10,False)
+===================================================================================================================================================================
+
+Requirement 3
+In HDFS
+hdfs dfs -mkdir hdfs://localhost:50000/user/hduser/projectout
+
+In pyspark
+ t=spark.sql("select c.cust_state as state,c.cust_city as city,t.year,min(i.item_price*t.no_of_item) as minimium,max(i.item_price*t.no_of_item) as maximum,avg(i.item_price*t.no_of_item) as average from sourcedb.customer c join sourcedb.tran_cust_item t on c.cust_id=t.cust_id join sourcedb.item i on i.item_code = t.item_code group by cust_city,cust_state,year order by state,city,year")
+ t.createOrReplaceTempView("temp")
+t1=spark.sql("select rpad(state,40,' ') as state,rpad(city,40,' ') as city,year,round(average,2) as average,maximum,minimium from temp")
+t1.createOrReplaceTempView("temp1")
+t2=spark.sql("select state,city,year,average,(case when maximum=average then 0 else maximum end) as maximum,(case when minimium=average then 0 else minimium end) as minimum from temp1")
+
+
+t2.coalesce(1).write.csv('hdfs://localhost:50000/user/hduser/projectout/Loc_Item_Anlz_Summ.csv',header=True)
+====================================================================================================================================================================
+Requirement 4
+top3_df=spark.sql("select i.item_name as product_name,sum(i.item_price*ct.no_of_item) as product_value from sourcedb.tran_cust_item ct join sourcedb.item i on ct.item_code=i.item_code group by product_name order by product_value desc limit 3")
+top3_df.coalesce(1).write.csv('file:///home/hduser/project/top.csv',header=True)
+
+rename the file stored  to final.csv and send it to windows 
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+%matplotlib inline
+
+dataset = pd.read_csv("final.csv")
+
+product_name = dataset['product_name']
+sold_value =dataset['sold_value']
+sold_value=round(sold_value/100000,2)
+
+plt.ylabel("Value(in lakhs)")
+plt.xlabel("Name of product")
+plt.title("Top 3 items Value wise")
+for i in range(len(product_name)):
+    plt.text(i, sold_value[i] , sold_value[i] ,ha='center' ,va='bottom')
+plt.bar(product_name,sold_value,color=['r','g','b'])
+plt.savefig("output.png")
+
+
